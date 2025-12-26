@@ -1,0 +1,27 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Rust files
+*.rs linguist-language=Rust
+rust-lib/** linguist-language=Rust
+
+# TypeScript/JavaScript
+*.ts linguist-language=TypeScript
+*.tsx linguist-language=TypeScript
+*.js linguist-language=JavaScript
+*.jsx linguist-language=JavaScript
+
+# CSS
+*.css linguist-language=CSS
+
+# Markdown
+*.md linguist-language=Markdown
+
+# Exclude generated files from language stats
+rust-lib/target/** linguist-vendored
+rust-lib/pkg/** linguist-generated
+node_modules/** linguist-vendored
+.next/** linguist-generated
+dist/** linguist-generated
+build/** linguist-generated
+

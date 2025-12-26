@@ -1,0 +1,371 @@
+// Prisma Schema for Flow / RAMarket
+generator client {
+  provider = "prisma-client"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// User model - core authentication and profile
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  passwordHash  String?   // null for OAuth-only users
+  name          String?
+  image         String?
+  role          UserRole  @default(CONSUMER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Profile fields
+  walletAddress String?   // Optional wallet address
+  payoutAddress String?   // USDC payout address for providers
+  kycVerified   Boolean   @default(false)
+  kycSubmittedAt DateTime?
+
+  // Relations
+  accounts      Account[]
+  sessions      Session[]
+  offers        Offer[]
+  rentals       Rental[]
+  payments      Payment[]
+  consumerInvoices Invoice[] @relation("ConsumerInvoices")
+  providerInvoices Invoice[] @relation("ProviderInvoices")
+  nodes         Node[]
+  auditLogs     AuditLog[]
+
+  @@index([email])
+  @@index([role])
+}
+
+enum UserRole {
+  CONSUMER
+  PROVIDER
+  ADMIN
+}
+
+// NextAuth account model for OAuth
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+// NextAuth session model
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Verification token for email verification
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// Provider Node - represents a physical/virtual machine
+model Node {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  region      String
+  status      NodeStatus @default(OFFLINE)
+  lastHeartbeat DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Resource capacity
+  totalRamGB      Float
+  availableRamGB  Float
+  totalGpuCount   Int     @default(0)
+  availableGpuCount Int    @default(0)
+  gpuVramGB       Float?  // VRAM per GPU if applicable
+
+  // Metadata
+  metadata        Json?   // Additional node info (OS, specs, etc.)
+
+  user            User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  offers          Offer[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([region])
+}
+
+enum NodeStatus {
+  ONLINE
+  OFFLINE
+  MAINTENANCE
+}
+
+// Offer - provider's resource offering
+model Offer {
+  id        String   @id @default(cuid())
+  userId   String
+  nodeId   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  published Boolean  @default(false)
+  active    Boolean  @default(true)
+
+  // Resource type and amount
+  resourceType ResourceType
+  amount       Float   // GB for RAM, count for GPU
+  region       String
+
+  // Pricing
+  pricePerUnitPerTime Float // per GB-hour (RAM) or per GPU-minute (GPU)
+  currency            String @default("USDC")
+
+  // Constraints
+  minDurationMinutes  Int    @default(60)
+  maxDurationMinutes  Int?
+  maxConcurrentRentals Int   @default(1)
+
+  // Availability schedule (JSON: { "timezone": "UTC", "schedule": [...] })
+  availabilitySchedule Json?
+
+  // SLA
+  slaUptimePercent Float?   @default(99.9)
+  slaResponseTimeMs Int?
+
+  // Reliability metrics (calculated)
+  reliabilityScore Float?   @default(0)
+  totalRentals     Int      @default(0)
+  successfulRentals Int     @default(0)
+
+  // Relations
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  node    Node?    @relation(fields: [nodeId], references: [id], onDelete: SetNull)
+  rentals Rental[]
+
+  @@index([userId])
+  @@index([resourceType])
+  @@index([region])
+  @@index([published, active])
+  @@index([pricePerUnitPerTime])
+}
+
+enum ResourceType {
+  RAM
+  GPU
+}
+
+// Rental - consumer's rental of an offer
+model Rental {
+  id        String   @id @default(cuid())
+  offerId   String
+  userId    String   // Consumer
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Rental details
+  resourceType ResourceType
+  amount       Float   // Amount rented
+  durationMinutes Int
+  startTime    DateTime?
+  endTime      DateTime?
+  status       RentalStatus @default(PENDING)
+
+  // Pricing (snapshot at rental time)
+  unitPrice    Float
+  totalPrice   Float
+  platformFee  Float
+  currency     String @default("USDC")
+
+  // Access credentials (encrypted in production)
+  accessToken  String? // Token for accessing the resource
+  accessUrl    String? // URL/endpoint for accessing the resource
+
+  // Relations
+  offer        Offer    @relation(fields: [offerId], references: [id], onDelete: Restrict)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payments     Payment[]
+  usageRecords UsageRecord[]
+  invoice      Invoice?
+
+  @@index([userId])
+  @@index([offerId])
+  @@index([status])
+  @@index([startTime, endTime])
+}
+
+enum RentalStatus {
+  PENDING      // Created but not started
+  ACTIVE       // Currently running
+  COMPLETED    // Finished successfully
+  CANCELLED    // Cancelled before completion
+  FAILED       // Failed due to error
+}
+
+// Payment - x402 payment records
+model Payment {
+  id            String   @id @default(cuid())
+  rentalId      String?
+  userId        String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // x402 payment details
+  paymentId     String   @unique // x402 payment ID
+  amount        Float
+  currency      String   @default("USDC")
+  status        PaymentStatus @default(PENDING)
+
+  // x402 protocol fields
+  challenge     String?  // HTTP 402 challenge
+  proof         String?  // Payment proof/token
+  settledAt     DateTime?
+
+  // Relations
+  rental        Rental?  @relation(fields: [rentalId], references: [id], onDelete: SetNull)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  settlements   Settlement[]
+
+  @@index([userId])
+  @@index([rentalId])
+  @@index([status])
+  @@index([paymentId])
+}
+
+enum PaymentStatus {
+  PENDING
+  AUTHORIZED
+  SETTLED
+  FAILED
+  REFUNDED
+}
+
+// Invoice - billing record
+model Invoice {
+  id            String   @id @default(cuid())
+  rentalId     String   @unique
+  userId       String
+  providerId   String   // Offer owner
+  createdAt     DateTime @default(now())
+
+  // Billing details
+  subtotal     Float
+  platformFee  Float
+  total        Float
+  currency     String   @default("USDC")
+
+  // Invoice status
+  status       InvoiceStatus @default(PENDING)
+  paidAt       DateTime?
+
+  // Relations
+  rental       Rental   @relation(fields: [rentalId], references: [id], onDelete: Cascade)
+  consumer     User     @relation("ConsumerInvoices", fields: [userId], references: [id], onDelete: Cascade)
+  provider     User     @relation("ProviderInvoices", fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([providerId])
+  @@index([status])
+}
+
+enum InvoiceStatus {
+  PENDING
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+// UsageRecord - metering records for billing
+model UsageRecord {
+  id            String   @id @default(cuid())
+  rentalId     String
+  createdAt     DateTime @default(now())
+
+  // Usage metrics
+  startTime     DateTime
+  endTime       DateTime
+  durationSeconds Int
+  amount        Float    // Resource amount used
+  cost          Float    // Calculated cost for this period
+
+  // Settlement status
+  settled       Boolean  @default(false)
+  settledAt     DateTime?
+
+  // Relations
+  rental        Rental   @relation(fields: [rentalId], references: [id], onDelete: Cascade)
+  settlements   Settlement[]
+
+  @@index([rentalId])
+  @@index([settled])
+  @@index([startTime, endTime])
+}
+
+// Settlement - periodic settlement records
+model Settlement {
+  id            String   @id @default(cuid())
+  paymentId     String?
+  usageRecordId String?
+  createdAt     DateTime @default(now())
+
+  // Settlement details
+  amount        Float
+  currency      String   @default("USDC")
+  status        SettlementStatus @default(PENDING)
+  settledAt     DateTime?
+
+  // Relations
+  payment       Payment?      @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  usageRecord   UsageRecord?  @relation(fields: [usageRecordId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum SettlementStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// AuditLog - security and activity audit trail
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  resource  String?  // Resource type (e.g., "rental", "payment")
+  resourceId String?
+  metadata  Json?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([resource, resourceId])
+  @@index([createdAt])
+}
